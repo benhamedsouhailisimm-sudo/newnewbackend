@@ -1,10 +1,4 @@
-import app from "./Server.js";
-
-// Local testing
-if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 4000;
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+export default function handler(req, res) {
+  // Just a simple test
+  res.status(200).json({ message: "Backend ✅ is alive" });
 }
-
-// Vercel serverless
-export default app;
