@@ -1,21 +1,10 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+import app from "./Server.js";
 
-dotenv.config();
+// Local testing
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 4000;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-// test route
-app.get("/", (req, res) => {
-  res.json({ message: "Backend running ✅" });
-});
-
-// your routes
-// app.use("/auth", authRoutes);
-// app.use("/users", userRoutes);
-
+// Vercel serverless
 export default app;
