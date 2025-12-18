@@ -19,7 +19,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "secret_key";
 
 /* ---------------- ROOT ---------------- */
 app.get("/", (req, res) => {
-  res.json({ message: "Backend running  !!!!!!!!!!!!!!!!!!✅" });
+  res.json({ message: "Backend  ✅" });
 });
 
 /* ---------------- LOGIN ---------------- */
