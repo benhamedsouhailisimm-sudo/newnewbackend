@@ -1,0 +1,10 @@
+    196.177.255.157
+
+lt --port 4000 --subdomain mybackend
+    your url is: https://mybackend.loca.lt
+
+
+ lt --port 3000 --subdomain myfrontend
+your url is: https://myfrontend.loca.lt
+
+q

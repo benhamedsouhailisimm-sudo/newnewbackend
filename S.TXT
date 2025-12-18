@@ -1,0 +1,422 @@
+  import express from "express";
+  import cors from "cors";
+  import { Pool } from "pg";
+  import jwt from "jsonwebtoken";
+  import QRCode from "qrcode";
+  import dotenv from "dotenv";
+
+  dotenv.config();
+
+  const app = express();
+
+  /* ---------------- MIDDLEWARE ---------------- */
+  app.use(cors());
+  app.use(express.json());
+
+  /* ---------------- POSTGRES ---------------- */
+  const pool = new Pool({
+    user: process.env.DB_USER || "postgres",
+    host: process.env.DB_HOST || "localhost",
+    database: process.env.DB_NAME || "chaher",
+    password: process.env.DB_PASS || "0405",
+    port: process.env.DB_PORT || 5432,
+  });
+
+  /* ---------------- JWT ---------------- */
+  const JWT_SECRET = process.env.JWT_SECRET || "secret_key";
+
+  /* ---------------- ROOT ---------------- */
+  app.get("/", (req, res) => {
+    res.json({ message: "Server running 🚀" });
+  });
+
+  /* ---------------- LOGIN ---------------- */
+  app.post("/login", async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password)
+      return res.status(400).json({ message: "Missing credentials" });
+
+    try {
+      const result = await pool.query(
+        "SELECT * FROM users WHERE email = $1 AND password = $2",
+        [email, password]
+      );
+
+      if (result.rows.length === 0)
+        return res.status(401).json({ message: "Invalid login" });
+
+      const user = result.rows[0];
+
+      const token = jwt.sign(
+        { id: user.id, name: user.name, role: user.role },
+        JWT_SECRET,
+        { expiresIn: "1h" }
+      );
+
+      res.json({ user, token });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  /* ---------------- AUTH MIDDLEWARE ---------------- */
+  function authenticateToken(req, res, next) {
+    const auth = req.headers["authorization"];
+    const token = auth && auth.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "No token" });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) return res.status(403).json({ message: "Invalid token" });
+      req.user = user;
+      next();
+    });
+  }
+
+  /* ---------------- GET MEMBERS ---------------- */
+  app.get("/members", async (req, res) => {
+    try {
+      const result = await pool.query(
+        "SELECT id, name, group_id, has_access_today,qr_code,entered FROM members ORDER BY id"
+      );
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  /* ---------------- ENTER MEMBER ---------------- */
+  app.post("/members/:id/enter", async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ message: "Invalid id" });
+
+    try {
+      const result = await pool.query(
+        "SELECT has_access_today FROM members WHERE id = $1",
+        [id]
+      );
+
+      if (result.rowCount === 0)
+        return res.status(404).json({ message: "Member not found" });
+
+      if (!result.rows[0].has_access_today)
+        return res.status(403).json({ message: "No access today" });
+
+      await pool.query(
+        "UPDATE members SET entered = true WHERE id = $1",
+        [id]
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+  
+  // GET /hisenter/:id — للتحقق إذا كان العضو قد دخل مسبقًا
+app.get("/hisenter/:id", async (req, res) => {
+  const { id } = req.params;
+  const memberId = parseInt(id, 10);
+
+  if (isNaN(memberId)) {
+    return res.status(400).json({ message: "معرف غير صالح" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT entered FROM members WHERE id = $1",
+      [memberId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "العضو غير موجود" });
+    }
+
+    res.json({ entered: result.rows[0].entered }); // true أو false فقط
+  } catch (err) {
+    console.error("خطأ في التحقق من الدخول:", err);
+    res.status(500).json({ message: "حدث خطأ في السيرفر" });
+  }
+});
+
+  /* ================= ACCESS ROUTES ================= */
+    
+  /* ✅ BULK — MUST BE FIRST */
+ app.post("/members/haveAccess/bulk", async (req, res) => {
+  const { memberIds, accessStates } = req.body;
+
+  if (!Array.isArray(memberIds) || memberIds.length === 0) {
+    return res.status(400).json({ message: "memberIds required" });
+  }
+
+  if (!Array.isArray(accessStates) || accessStates.length !== memberIds.length) {
+    return res.status(400).json({ message: "accessStates must match memberIds" });
+  }
+
+  try {
+    // Loop over all members and update their access according to accessStates
+    for (let i = 0; i < memberIds.length; i++) {
+      await pool.query(
+        `UPDATE members SET has_access_today = $1 WHERE id = $2`,
+        [accessStates[i], memberIds[i]]
+      );
+    }
+
+    res.json({ success: true, updated: memberIds.length });
+  } catch (err) {
+    console.error("BULK ERROR:", err);
+    res.status(500).json({ message: "Bulk update failed" });
+  }
+});
+
+
+  /* ✅ SINGLE — SECOND */
+  app.post("/members/haveAccess/:id", async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ message: "Invalid id" });
+
+    try {
+      await pool.query(
+        `
+        UPDATE members
+        SET
+          has_access_today = NOT has_access_today,
+          entered = CASE
+            WHEN has_access_today = true THEN false
+            ELSE entered
+          END
+        WHERE id = $1
+        `,
+        [id]
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("SINGLE ERROR:", err);
+      res.status(500).json({ message: "Update failed" });
+    }
+  });
+
+  /* ---------------- MY GROUPS ---------------- */
+  app.get("/my-groups/:userId", async (req, res) => {
+    const userId = parseInt(req.params.userId, 10);
+
+    try {
+      const groupsRes = await pool.query(
+        "SELECT id, name FROM groups WHERE leader_id = $1",
+        [userId]
+      );
+
+      const groups = await Promise.all(
+        groupsRes.rows.map(async (group) => {
+          const membersRes = await pool.query(
+            "SELECT id, name, has_access_today, entered FROM members WHERE group_id = $1",
+            [group.id]
+          );
+
+          return { ...group, members: membersRes.rows };
+        })
+      );
+
+      res.json({ groups });
+    } catch (err) {
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+  /* ================= GROUPS ================= */
+app.get("/groups", async (req, res) => {
+  try {
+    const groupsRes = await pool.query(
+      "SELECT id, name FROM groups ORDER BY id"
+    );
+
+    const groups = await Promise.all(
+      groupsRes.rows.map(async (group) => {
+        const membersRes = await pool.query(
+          `
+          SELECT
+          id,
+            name,
+            has_access_today,
+            entered,
+            qr_code
+          FROM members
+          WHERE group_id = $1
+          `,
+          [group.id]
+        );
+
+        const members = membersRes.rows || [];
+
+        return {
+          id: group.id,  
+          name: group.name,
+          membersCount: members.length,
+          accessToday: members.filter(m => m.has_access_today).length,
+          entered: members.filter(m => m.entered).length,
+          memberDetails: members, // ✅ always array
+        };
+      })
+    );
+
+    // ✅ RETURN ARRAY DIRECTLY
+    res.json(groups);
+  } catch (err) {
+    console.error("GROUPS ERROR:", err);
+    res.status(500).json([]);
+  }
+});
+app.get("/members/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const memberId = parseInt(id, 10);
+    if (isNaN(memberId)) return res.status(400).json({ message: "Invalid ID" });
+
+    const memberResult = await pool.query(
+      "SELECT id, has_access_today, entered, group_id, name FROM members WHERE id = $1",
+      [memberId]
+    );
+
+    if (memberResult.rows.length === 0) {
+      return res.status(404).json({ message: "Member not found" });
+    }
+
+    const member = memberResult.rows[0];
+
+    // Send member directly, no wrapping
+    res.json(member);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+  /* ---------------- 404 ---------------- */
+  /* ---------------- 404 ---------------- */
+  
+// ADD HERE:
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.use(express.static(path.join(__dirname, "../front/build")));
+
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "../front/build", "index.html"));
+});
+
+// 404 API fallback (optional, will be overridden by React)
+app.use((req, res) =>
+  res.status(404).json({ message: "Route not found" })
+);
+
+/* ---------------- START ---------------- */
+app.listen(PORT, () =>
+  console.log(`✅ Server running on port ${PORT}`)
+);
+
+
+/* ---------------- GENERATE ALL QR CODES ---------------- */
+app.post("/generate-all-qr", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM members");
+    const members = result.rows;
+
+    for (const member of members) {
+      // Skip if QR code already exists
+      if (member.qr_code) continue;
+
+      // Generate QR code as base64
+      const qrData = {
+        id: member.id,
+        name: member.name,
+        access: member.has_access_today || false,
+        group_id: member.group_id,
+      };
+
+      const qrCodeBase64 = await QRCode.toDataURL(JSON.stringify(qrData));
+
+      // Save QR code in DB
+      await pool.query(
+        "UPDATE members SET qr_code = $1 WHERE id = $2",
+        [qrCodeBase64, member.id]
+      );
+    }
+
+    res.json({ message: "All QR codes generated successfully ✅" });
+  } catch (err) {
+    console.error("QR GENERATION ERROR:", err);
+    res.status(500).json({ message: "Server error ❌" });
+  }
+});
+// POST addmembers
+app.post("/groups/addmembers", async (req, res) => {
+  const { groupId, name } = req.body;
+
+  if (!name) return res.status(400).json({ error: "اسم العضو مطلوب" });
+
+  try {
+    // 1️⃣ Insert the new member
+    const result = await pool.query(
+      `INSERT INTO members (name, group_id, has_access_today, entered) 
+       VALUES ($1, $2, false, false) 
+       RETURNING id, name, has_access_today, entered, group_id`,
+      [name, groupId]
+    );
+
+    const newMember = result.rows[0];
+
+    // 2️⃣ Generate QR code for this member
+    const qrData = {
+      id: newMember.id,
+      name: newMember.name,
+      access: newMember.has_access_today,
+      group_id: newMember.group_id,
+    };
+    const qrCodeBase64 = await QRCode.toDataURL(JSON.stringify(qrData));
+
+    // 3️⃣ Save QR code to DB
+    await pool.query(
+      "UPDATE members SET qr_code = $1 WHERE id = $2",
+      [qrCodeBase64, newMember.id]
+    );
+
+    // 4️⃣ Return new member with QR code
+    res.json({ ...newMember, qr_code: qrCodeBase64 });
+  } catch (err) {
+    console.error("خطأ في إضافة العضو:", err);
+    res.status(500).json({ error: "حدث خطأ أثناء الإضافة" });
+  }
+});
+// DELETE /members/:memberId
+app.delete("/members/delete/:memberId", async (req, res) => {
+  const { memberId } = req.params;
+
+  try {
+    await pool.query(`DELETE FROM members WHERE id = $1`, [memberId]);
+    res.json({ message: "تم حذف العضو بنجاح" });
+  } catch (err) {
+    console.error("خطأ في حذف العضو:", err);
+    res.status(500).json({ error: "حدث خطأ أثناء الحذف" });
+  }
+});
+
+
+
+
+
+
+
+  app.use((req, res) =>
+    res.status(404).json({ message: "Route not found" })
+  );
+  /* ---------------- START ---------------- */
+  const PORT = process.env.PORT || 4000;
+  app.listen(PORT, () =>
+    console.log(`✅ Server running on port ${PORT}`)
+  );
